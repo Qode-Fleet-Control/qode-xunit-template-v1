@@ -1,130 +1,80 @@
-# fleet-template-v1
+# xUnit.net template
 
-## What This Template Is
+Provisioned from [`Qode-Fleet-Control/fleet-template-v1`](https://github.com/Qode-Fleet-Control/fleet-template-v1) — the fleet
+lifecycle contract (`bin/`, `fleet.conf`, `compose.yaml`, deploy workflows) with an
+xUnit.net v3 test suite laid on top.
 
-`fleet-template-v1` is a **language-agnostic app lifecycle harness** for apps
-managed by the fleet platform. It gives any app — Node, Python, Go, a Docker
-Compose stack, anything — a uniform way to be deployed and controlled, without
-the fleet needing to know a single thing about your stack.
+    App.slnx                     the solution (src + tests)
+    global.json                  `dotnet test` uses Microsoft.Testing.Platform
+    src/App/                     a small library: Calculator, Inventory (replace with yours)
+    tests/App.Tests/             the xUnit.net v3 suite
+    Dockerfile                   SDK image; builds at image build, CMD runs the suite
+    compose.yaml                 the fleet's docker runtime (service `app`, no ports)
 
-The fleet injects runtime variables into the environment (`PORT`, `BASE_PATH`,
-`DATABASE_URL`) and calls `./bin/run` to deploy. Everything project-specific —
-how to install, build, and start your app — lives in **one file: `fleet.conf`**.
-That is the only file you edit per project.
+The suite shows `[Fact]`, `[Theory]` with `[InlineData]` and `[MemberData]`/`TheoryData`,
+`Assert.Throws`, an async test using `TestContext.Current.CancellationToken`, and a shared
+`IClassFixture<T>`.
 
-## Repository Structure
+**This repo is not a service.** It serves no HTTP: `START_CMD` and `DOCKER_START_CMD` are
+empty, so `bin/run` installs/builds and stops there. The job is the test suite.
 
-```
-fleet.conf        ← the only file you edit per project
-.env              ← local-only env vars (gitignored)
-bin/
-  _common.sh      ← shared logic; never edit this
-  run             ← install + build + start (called by the fleet)
-  start           ← start only (no rebuild)
-  restart         ← stop + full run
-  reload          ← hot-reload config without rebuild
-  stop            ← stop the running process
-```
+## Origin
 
-## The One File You Edit: `fleet.conf`
+Generated 2026-10-05 with the official generators, inside the official SDK image (.NET SDK
+10.0.401) — `xunit3` comes from xUnit.net's own template pack, as its getting-started guide
+teaches:
 
-`fleet.conf` is sourced as shell by the lifecycle scripts. Fill in the commands
-for your stack; leave any command empty (`''`) to skip that step.
+    docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v "$PWD":/w -w /w \
+      mcr.microsoft.com/dotnet/sdk:10.0 bash -c '
+        dotnet new install xunit.v3.templates
+        dotnet new sln -n App
+        dotnet new classlib -n App -o src/App --framework net10.0
+        dotnet new xunit3 -n App.Tests -o tests/App.Tests --framework net10.0
+        dotnet add tests/App.Tests reference src/App
+        dotnet sln add src/App tests/App.Tests'
 
-```sh
-NAME="my-app"           # label shown in fleet logs
-PORT="3000"             # default port (fleet overrides via $PORT env var)
-HEALTH_PATH="/"         # HTTP path that returns 200 when the app is ready
+## Running it
 
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/server.js'   # must listen on $PORT; run in foreground
-RELOAD_CMD=''           # optional; empty → falls back to stop+start
-```
+**On the fleet / with docker**
 
-> **Critical rule:** single-quote any command that uses `$PORT` or
-> `$BASE_PATH`. Single quotes defer variable expansion to **runtime** — when the
-> command actually runs, with the fleet-injected value — rather than at the
-> moment `fleet.conf` is sourced (when those values aren't set yet). Use
-> `START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'`, never double quotes.
+    bin/run                          # = docker compose build (no server to start)
+    docker compose run --rm app      # runs the suite; exit 0 = all passed
 
-## How the Lifecycle Works
+**Without docker** (needs the .NET 10 SDK on PATH)
 
-| Script | What it does | When to use |
-| --- | --- | --- |
-| `bin/run` | `INSTALL_CMD` → `BUILD_CMD` → `START_CMD` | Fleet deploy, fresh start |
-| `bin/start` | `START_CMD` only | Restart without rebuild |
-| `bin/restart` | stop + `bin/run` | After a code/dep change |
-| `bin/reload` | `RELOAD_CMD`, or stop+start if empty | After a config-only change |
-| `bin/stop` | Kill by pidfile or port | Tear down |
+    dotnet test                      # restore, build, run the suite
+    FLEET_RUNTIME=process bin/run    # = dotnet restore App.slnx && dotnet build App.slnx
 
-> The process PID is written to `.fleet/app.pid` so subsequent `stop`/`restart`
-> calls can find and terminate it reliably. If the pidfile is missing or stale,
-> `stop` falls back to freeing whatever is listening on `$PORT`.
+| step | process runtime | docker runtime |
+|---|---|---|
+| install | `dotnet restore App.slnx` | — |
+| build | `dotnet build App.slnx --no-restore` | `docker compose build` |
+| run the job | `dotnet test` | `docker compose run --rm app` |
 
-## How to Apply This to Your Project
+## Deviations from the stock generator output, and why
 
-### Step 1 — Copy the template into your repo
+- `Class1.cs` and `UnitTest1.cs` replaced by a small library and a suite that actually
+  exercises xUnit's features.
+- Projects under `src/` and `tests/`, not the repo root: .NET writes build output to each
+  project's `bin/`/`obj/`, which at the root would collide with the fleet's `bin/` scripts.
+- Added: `Dockerfile`, `compose.yaml`, `.dockerignore`, a compact `.gitignore` (the stock
+  `dotnet new gitignore` ignores every `bin/` — including the fleet's), `.env.example`,
+  `fleet.conf`, `bin/`, `.github/workflows/`, `docs/fleet-lifecycle.md`.
+- No NuGet lock file: the generators do not create one.
 
-```sh
-cp -r fleet-template-v1/* my-project/
-```
+## Serving over HTTP
 
-Or, if starting fresh, just clone it and work from `main`.
+Fleet apps are served at the root of their own hostname. If you add an HTTP endpoint, listen
+on `0.0.0.0:$PORT` and serve at `/`, then set `PORT`, `HEALTH_PATH`, `START_CMD` and
+`DOCKER_START_CMD` in `fleet.conf` and publish the port in `compose.yaml`.
 
-### Step 2 — Edit `fleet.conf` (the only required change)
+## Verified
 
-Fill in your stack's commands. Per-stack examples:
+**The docker runtime has NOT been verified yet.** On 2026-10-05 the shared docker host's disk
+stayed at 0-5G free (under the 6G floor for a build) for over five hours, so `docker compose build`
+was never run for this repo. Run the checks below once before trusting the image.
 
-```sh
-# Node.js
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/index.js'
+What did pass, inside `mcr.microsoft.com/dotnet/sdk:10.0` (.NET SDK 10.0.401): `dotnet test` →
+14 tests, 14 passed.
 
-# Python (Gunicorn)
-INSTALL_CMD='pip install -r requirements.txt'
-BUILD_CMD=''
-START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'
-
-# Go
-INSTALL_CMD=''
-BUILD_CMD='go build -o ./out/server ./cmd/server'
-START_CMD='./out/server'
-
-# Docker Compose
-INSTALL_CMD=''
-BUILD_CMD='docker compose build'
-START_CMD='docker compose up'
-RELOAD_CMD='docker compose up -d --no-build'
-```
-
-### Step 3 — Set local env vars in `.env` (gitignored)
-
-```sh
-APP_NAME=My App
-DATABASE_URL=postgres://localhost/mydb
-```
-
-### Step 4 — Verify standalone
-
-```sh
-PORT=3001 bin/run      # should install, build, and serve on 3001
-curl http://localhost:3001/   # should 200
-```
-
-### Step 5 — Connect to the fleet
-
-Point the fleet at your repo. It will clone it, inject `PORT` / `BASE_PATH` /
-`DATABASE_URL`, and call `bin/run`. As long as your `START_CMD` listens on
-`$PORT` and `HEALTH_PATH` returns 200, the fleet will mark the app healthy.
-
-## Key Invariants
-
-- **`START_CMD` must run in the foreground and listen on `$PORT`.** Do not use a
-  dev server — HMR / hot-reload chunks 404 behind the ingress and will break the
-  app.
-- **Never put secrets in `fleet.conf`** — it's committed. Use `.env` locally;
-  the fleet injects secrets via the environment.
-- **`bin/_common.sh` is shared infrastructure** — don't edit it per project. All
-  project-specific configuration belongs in `fleet.conf`.
+Still to run: `docker compose build && docker compose run --rm app` (expect exit 0).
